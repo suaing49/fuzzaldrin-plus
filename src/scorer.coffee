@@ -10,31 +10,33 @@
 
 PathSeparator = require('path').sep
 
-#Base point for a single character match
+# Base point for a single character match
+# This balance making patterns VS position and size penalty.
 wm = 150
 
 #Fading function
-pos_bonus = 20 # The character from 0..pos_bonus receive a bonus for being at the start of string.
-tau_size = 50 # Size at which the whole match score is halved.
-tau_depth = 13 # Directory depth at which the full path influence is halved
+pos_bonus = 20 # The character from 0..pos_bonus receive a greater bonus for being at the start of string.
+tau_depth = 13 # Directory depth at which the full path influence is halved.
+tau_size = 85 # Full path length at which the whole match score is halved.
+file_coeff = 1.2 # Full path is also penalized for length of basename. This adjust a scale factor for that penalty.
 
 # Miss count
-# When subject[i] == query[j] we register a hit.
+# When subject[i] is query[j] we register a hit.
 # Limiting hit put a boundary on how many permutation we consider to find the best one.
-# Help to speed up the processing of deep path and frequent character eg vowels
+# Helps to speed-up processing of long path and query containing frequent character (eg vowels)
+#
 # If a spec with frequent repetition fail, increase this.
 # This has a direct influence on worst case scenario benchmark.
 miss_coeff = 0.75 #Max number missed consecutive hit = ceil(miss_coeff*query.length) + 5
 
 #
 # Optional chars
-#
+# Those char improve the score if present, but will not block the match (score=0) if absent.
 
 opt_char_re = /[ _\-:\/\\]/g
 
-exports.coreChars = coreChars = (query) ->
-  return query.replace(opt_char_re, '')
-
+exports.coreChars = coreChars = (query, optCharRegEx = opt_char_re) ->
+  return query.replace(optCharRegEx, '')
 
 #
 # Main export
@@ -42,26 +44,32 @@ exports.coreChars = coreChars = (query) ->
 # Manage the logic of testing if there's a match and calling the main scoring function
 # Also manage scoring a path and optional character.
 
-exports.score = (string, query, prepQuery = new Query(query), allowErrors = false) ->
+exports.score = (string, query, prepQuery, allowErrors, isPath) ->
   return 0 unless allowErrors or isMatch(string, prepQuery.core_lw, prepQuery.core_up)
   string_lw = string.toLowerCase()
-  score = doScore(string, string_lw, prepQuery)
-  return Math.ceil(basenameScore(string, string_lw, prepQuery, score))
+  score = scoreMain(string, string_lw, prepQuery)
+  if isPath then score = scorePath(string, string_lw, prepQuery, score)
+  return Math.ceil(score)
 
 
 #
 # Query object
 #
+# Allow to reuse some quantities computed from query.
+# Optional char can optionally be specified in the form of a regular expression.
+#
+
 class Query
-  constructor: (query) ->
-    return null unless query?.length
+  constructor: (query, optCharRegEx) ->
+    return null unless query and query.length
 
     @query = query
     @query_lw = query.toLowerCase()
-    @core = coreChars(query)
+    @core = coreChars(query, optCharRegEx)
     @core_lw = @core.toLowerCase()
-    @core_up = @core.toUpperCase()
+    @core_up = truncatedUpperCase(@core)
     @depth = countDir(query, query.length)
+    @ext = getExtension(@query_lw)
 
 
 exports.prepQuery = (query) ->
@@ -70,14 +78,14 @@ exports.prepQuery = (query) ->
 
 #
 # isMatch:
-# Are all characters of query in subject, in proper order ?
+# Are all (non optional)characters of query in subject, in proper order ?
 #
 
 exports.isMatch = isMatch = (subject, query_lw, query_up) ->
   m = subject.length
   n = query_lw.length
 
-  if !m or !n or n > m
+  if !m or n > m
     return false
 
   i = -1
@@ -89,12 +97,16 @@ exports.isMatch = isMatch = (subject, query_lw, query_up) ->
     qj_lw = query_lw[j]
     qj_up = query_up[j]
 
+    # continue walking the subject from where we have left with previous query char
+    # until we have found a character that is either lowercase or uppercase query.
     while ++i < m
       si = subject[i]
-      break if si == qj_lw or si == qj_up
+      break if si is qj_lw or si is qj_up
 
-    if i == m then return false
+    # if we passed the last char, query is not in subject
+    if i is m then return false
 
+  #Found every char of query in subject in proper order, match is positive
   return true
 
 
@@ -103,7 +115,7 @@ exports.isMatch = isMatch = (subject, query_lw, query_up) ->
 # Main scoring algorithm
 #
 
-doScore = (subject, subject_lw, prepQuery) ->
+scoreMain = (subject, subject_lw, prepQuery) ->
   query = prepQuery.query
   query_lw = prepQuery.query_lw
 
@@ -119,7 +131,7 @@ doScore = (subject, subject_lw, prepQuery) ->
 
   # Whole query is abbreviation ?
   # => use that as score
-  if( acro.count == n)
+  if( acro.count is n)
     return scoreExact(n, m, acro_score, acro.pos)
 
   #----------------------------
@@ -151,12 +163,16 @@ doScore = (subject, subject_lw, prepQuery) ->
     csc_row[j] = 0
 
 
-  # Limit the search for the active region
-  # Before first letter, or -1
+  # Limit the search to the active region
+  # for example with query `abc`, subject `____a_bc_ac_c____`
+  # there's a region before first `a` and after last `c`
+  # that can be simplified out of the matching process
+
+  # Before first occurrence in subject of first letter of query, or -1
   i = subject_lw.indexOf(query_lw[0])
   if(i > -1) then i--
 
-  # After last letter
+  # After last occurrence of last letter of query,
   mm = subject_lw.lastIndexOf(query_lw[n - 1], m)
   if(mm > i) then m = mm + 1
 
@@ -181,13 +197,13 @@ doScore = (subject, subject_lw, prepQuery) ->
       csc_score = 0
 
       #Compute a tentative match
-      if ( query_lw[j] == si_lw )
+      if ( query_lw[j] is si_lw )
 
         start = isWordStart(i, subject, subject_lw)
 
         # Forward search for a sequence of consecutive char
-        csc_score = if csc_diag > 0  then csc_diag else scoreConsecutives(subject, subject_lw, query, query_lw, i,
-          j, start)
+        csc_score = if csc_diag > 0  then csc_diag else
+          scoreConsecutives(subject, subject_lw, query, query_lw, i, j, start)
 
         # Determine bonus for matching A[i] with B[j]
         align = score_diag + scoreCharacter(i, j, start, acro_score, csc_score)
@@ -223,24 +239,23 @@ doScore = (subject, subject_lw, prepQuery) ->
 #
 
 exports.isWordStart = isWordStart = (pos, subject, subject_lw) ->
-  return false if pos < 0
-  return true if pos == 0 # match is FIRST char ( place a virtual token separator before first char of string)
+  return true if pos is 0 # match is FIRST char ( place a virtual token separator before first char of string)
   curr_s = subject[pos]
   prev_s = subject[pos - 1]
-  return isSeparator(curr_s) or isSeparator(prev_s) or # match FOLLOW a separator
-      (  curr_s != subject_lw[pos] and prev_s == subject_lw[pos - 1] ) # match is Capital in camelCase (preceded by lowercase)
+  return isSeparator(prev_s) or # match FOLLOW a separator
+      (  curr_s isnt subject_lw[pos] and prev_s is subject_lw[pos - 1] ) # match is Capital in camelCase (preceded by lowercase)
 
 
 exports.isWordEnd = isWordEnd = (pos, subject, subject_lw, len) ->
-  return false if pos > len - 1
-  return true if  pos == len - 1 # last char of string
+  return true if  pos is len - 1 # last char of string
+  curr_s = subject[pos]
   next_s = subject[pos + 1]
-  return isSeparator(next_s) or # pos is followed by a separator
-      ( subject[pos] == subject_lw[pos] and next_s != subject_lw[pos + 1] ) # pos is lowercase, followed by uppercase
+  return isSeparator(next_s) or # match IS FOLLOWED BY a separator
+      ( curr_s is subject_lw[pos] and next_s isnt subject_lw[pos + 1] ) # match is lowercase, followed by uppercase
 
 
 isSeparator = (c) ->
-  return c == ' ' or c == '.' or c == '-' or c == '_' or c == '/' or c == '\\'
+  return c is ' ' or c is '.' or c is '-' or c is '_' or c is '/' or c is '\\'
 
 #
 # Scoring helper
@@ -251,7 +266,7 @@ scorePosition = (pos) ->
     sc = pos_bonus - pos
     return 100 + sc * sc
   else
-    return 100 + pos_bonus - pos
+    return Math.max(100 + pos_bonus - pos, 0)
 
 scoreSize = (n, m) ->
   # Size penalty, use the difference of size (m-n)
@@ -270,14 +285,16 @@ scoreExact = (n, m, quality, pos) ->
 exports.scorePattern = scorePattern = (count, len, sameCase, start, end) ->
   sz = count
 
-  bonus = 6 # to Enforce size ordering, this should be as large other bonus combined
-  bonus += 2 if( sameCase == count )
+  bonus = 6 # to ensure consecutive length dominate score, this should be as large other bonus combined
+  bonus += 2 if sameCase is count
   bonus += 3 if start
   bonus += 1 if end
 
-  if( count == len) #when we match 100% of query we allow to break the size ordering.
+  if count is len
+    # when we match 100% of query we allow to break the size ordering.
+    # This is to help exact match bubble up vs size, depth penalty etc
     if start
-      if( sameCase == len )
+      if sameCase is len
         sz += 2
       else
         sz += 1
@@ -293,14 +310,15 @@ exports.scorePattern = scorePattern = (count, len, sameCase, start, end) ->
 
 exports.scoreCharacter = scoreCharacter = (i, j, start, acro_score, csc_score) ->
 
-  #start of string bonus
+  # start of string / position of match bonus
   posBonus = scorePosition(i)
 
-  #match IS a word boundary:
+  # match IS a word boundary
+  # choose between taking part of consecutive characters or consecutive acronym
   if start
     return posBonus + wm * ( (if acro_score > csc_score then acro_score else csc_score) + 10  )
 
-  #normal Match, add proper case bonus
+  # normal Match
   return posBonus + wm * csc_score
 
 
@@ -318,14 +336,14 @@ exports.scoreConsecutives = scoreConsecutives = (subject, subject_lw, query, que
 
   startPos = i #record start position
   sameCase = 0
-  sz = 0 #sz will be one more than the last qi == sj
+  sz = 0 #sz will be one more than the last qi is sj
 
-  # query_lw[i] == subject_lw[j] has been checked before entering now do case sensitive check.
-  sameCase++ if (query[j] == subject[i])
+  # query_lw[i] is subject_lw[j] has been checked before entering now do case sensitive check.
+  sameCase++ if (query[j] is subject[i])
 
   #Continue while lowercase char are the same, record when they are case-sensitive match.
-  while (++sz < k and query_lw[++j] == subject_lw[++i])
-    sameCase++ if (query[j] == subject[i])
+  while (++sz < k and query_lw[++j] is subject_lw[++i])
+    sameCase++ if (query[j] is subject[i])
 
   # Faster path for single match.
   # Isolated character match occurs often and are not really interesting.
@@ -361,7 +379,7 @@ exports.scoreExactMatch = scoreExactMatch = (subject, subject_lw, query, query_l
   i = -1
   sameCase = 0
   while (++i < n)
-    if (query[pos + i] == subject[i])
+    if (query[pos + i] is subject[i])
       sameCase++
 
   end = isWordEnd(pos + n - 1, subject, subject_lw, m)
@@ -386,7 +404,8 @@ exports.scoreAcronyms = scoreAcronyms = (subject, subject_lw, query, query_lw) -
   return emptyAcronymResult unless m > 1 and n > 1
 
   count = 0
-  pos = 0
+  sepCount = 0
+  sumPos = 0
   sameCase = 0
 
   i = -1
@@ -397,26 +416,72 @@ exports.scoreAcronyms = scoreAcronyms = (subject, subject_lw, query, query_lw) -
 
     qj_lw = query_lw[j]
 
-    while ++i < m
+    # Separator will not score point but will continue the prefix when present.
+    # Test that the separator is in the candidate and advance cursor to that position.
+    # If no separator break the prefix
 
-      #test if subject match
-      # Only record match that are also start-of-word.
-      if qj_lw == subject_lw[i] and isWordStart(i, subject, subject_lw)
-        sameCase++ if ( query[j] == subject[i] )
-        pos += i
+    if isSeparator(qj_lw)
+      i = subject_lw.indexOf(qj_lw, i + 1)
+      if i > -1
+        sepCount++
+        continue
+      else
+        break
+
+    # For other characters we search for the first match where subject[i] = query[j]
+    # that also happens to be a start-of-word
+
+    while ++i < m
+      if qj_lw is subject_lw[i] and isWordStart(i, subject, subject_lw)
+        sameCase++ if ( query[j] is subject[i] )
+        sumPos += i
         count++
         break
 
-    #all of subject is consumed, stop processing the query.
-    if i == m then break
+    # All of subject is consumed, stop processing the query.
+    if i is m then break
 
-  #all of query is consumed.
-  #a single char is not an acronym (also prevent division by 0)
+
+  # Here, all of query is consumed (or we have reached a character not in acronym)
+  # A single character is not an acronym (also prevent division by 0)
   if(count < 2)
     return emptyAcronymResult
 
-  score = scorePattern(count, n, sameCase, true, false)
-  return new AcronymResult(score, pos / count, count)
+  # Acronym are scored as start-of-word
+  # Unless the acronym is a 1:1 match with candidate then it is upgraded to full-word.
+  fullWord = if count is n then isAcronymFullWord(subject, subject_lw, query, count) else false
+  score = scorePattern(count, n, sameCase, true, fullWord)
+
+  return new AcronymResult(score, sumPos / count, count + sepCount)
+
+
+#
+# Test whether there's a 1:1 relationship between query and acronym of candidate.
+# For that to happens
+# (a) All character of query must be matched to an acronym of candidate
+# (b) All acronym of candidate must be matched to a character of query.
+#
+# This method check for (b) assuming (a) has been checked before entering.
+
+isAcronymFullWord = (subject, subject_lw, query, nbAcronymInQuery) ->
+  m = subject.length
+  n = query.length
+  count = 0
+
+  # Heuristic:
+  # Assume one acronym every (at most) 12 character on average
+  # This filter out long paths, but then they can match on the filename.
+  if (m > 12 * n) then return false
+
+  i = -1
+  while ++i < m
+    #For each char of subject
+    #Test if we have an acronym, if so increase acronym count.
+    #If the acronym count is more than nbAcronymInQuery (number of non separator char in query)
+    #Then we do not have 1:1 relationship.
+    if isWordStart(i, subject, subject_lw) and ++count > nbAcronymInQuery then return false
+
+  return true
 
 
 #----------------------------------------------------------------------
@@ -425,32 +490,34 @@ exports.scoreAcronyms = scoreAcronyms = (subject, subject_lw, query, query_lw) -
 # Score adjustment for path
 #
 
-basenameScore = (subject, subject_lw, prepQuery, fullPathScore) ->
-  return 0 if fullPathScore == 0
-
+scorePath = (subject, subject_lw, prepQuery, fullPathScore) ->
+  return 0 if fullPathScore is 0
 
   # Skip trailing slashes
   end = subject.length - 1
-  end-- while subject[end] is PathSeparator
+  while subject[end] is PathSeparator then end--
 
   # Get position of basePath of subject.
   basePos = subject.lastIndexOf(PathSeparator, end)
 
-  #If no PathSeparator, no base path exist.
-  return fullPathScore if (basePos == -1)
+  # Get a bonus for matching extension
+  extAdjust = 1.0 + getExtensionScore(subject_lw, prepQuery.ext, basePos, end, 2)
+  fullPathScore *= extAdjust
+
+  # no basePath, nothing else to compute.
+  return fullPathScore if (basePos is -1)
 
   # Get the number of folder in query
   depth = prepQuery.depth
 
   # Get that many folder from subject
-  while(depth-- > 0)
+  while basePos > -1 and depth-- > 0
     basePos = subject.lastIndexOf(PathSeparator, basePos - 1)
-    if (basePos == -1) then return fullPathScore #consumed whole subject ?
 
-  # Get basePath score
-  basePos++
-  end++
-  basePathScore = doScore(subject[basePos...end], subject_lw[basePos...end], prepQuery)
+  # Get basePath score, if BaseName is the whole string, no need to recompute
+  # We still need to apply the folder depth and filename penalty.
+  basePathScore = if (basePos is -1) then fullPathScore else
+    extAdjust * scoreMain(subject.slice(basePos + 1, end + 1), subject_lw.slice(basePos + 1, end + 1), prepQuery)
 
   # Final score is linear interpolation between base score and full path score.
   # For low directory depth, interpolation favor base Path then include more of full path as depth increase
@@ -459,7 +526,7 @@ basenameScore = (subject, subject_lw, prepQuery, fullPathScore) ->
   # That way, more focused basePath match can overcome longer directory path.
 
   alpha = 0.5 * tau_depth / ( tau_depth + countDir(subject, end + 1) )
-  return  alpha * basePathScore + (1 - alpha) * fullPathScore * scoreSize(0, 0.5 * (end - basePos))
+  return  alpha * basePathScore + (1 - alpha) * fullPathScore * scoreSize(0, file_coeff * (end - basePos))
 
 
 #
@@ -472,10 +539,73 @@ exports.countDir = countDir = (path, end) ->
 
   count = 0
   i = -1
+
+  #skip slash at the start so `foo/bar` and `/foo/bar` have the same depth.
+  while ++i < end and path[i] is PathSeparator
+    continue
+
   while ++i < end
-    if (path[i] == PathSeparator)
-      ++count
-      while ++i < end and path[i] == PathSeparator
+    if (path[i] is PathSeparator)
+      count++ #record first slash, but then skip consecutive ones
+      while ++i < end and path[i] is PathSeparator
         continue
 
   return count
+
+#
+# Find fraction of extension that is matched by query.
+# For example mf.h prefers myFile.h to myfile.html
+# This need special handling because it give point for not having characters (the `tml` in above example)
+#
+
+getExtension = (str) ->
+  pos = str.lastIndexOf(".")
+  if pos < 0 then ""  else  str.substr(pos + 1)
+
+
+getExtensionScore = (candidate, ext, startPos, endPos, maxDepth) ->
+  # startPos is the position of last slash of candidate, -1 if absent.
+
+  return 0 unless ext.length
+
+  # Check that (a) extension exist, (b) it is after the start of the basename
+  pos = candidate.lastIndexOf(".", endPos)
+  return 0 unless pos > startPos # (note that startPos >= -1)
+
+  n = ext.length
+  m = endPos - pos
+
+  # n contain the smallest of both extension length, m the largest.
+  if( m < n)
+    n = m
+    m = ext.length
+
+  #place cursor after dot & count number of matching characters in extension
+  pos++
+  matched = -1
+  while ++matched < n then break if candidate[pos + matched] isnt ext[matched]
+
+  # if nothing found, try deeper for multiple extensions, with some penalty for depth
+  if matched is 0 and maxDepth > 0
+    return 0.9 * getExtensionScore(candidate, ext, startPos, pos - 2, maxDepth - 1)
+
+  # cannot divide by zero because m is the largest extension length and we return if either is 0
+  return  matched / m
+
+#
+# Truncated Upper Case:
+# --------------------
+#
+# A fundamental mechanic is that we are able to keep uppercase and lowercase variant of the strings in sync.
+# For that we assume uppercase and lowercase version of the string have the same length. Of course unicode being unicode there's exceptions.
+# See ftp://ftp.unicode.org/Public/UCD/latest/ucd/SpecialCasing.txt for the list
+#
+# "Straße".toUpperCase() -> "STRASSE"
+# truncatedUpperCase("Straße") -> "STRASE"
+# iterating over every character, getting uppercase variant and getting first char of that.
+#
+
+truncatedUpperCase = (str) ->
+  upper = ""
+  upper += char.toUpperCase()[0] for char in str
+  return upper

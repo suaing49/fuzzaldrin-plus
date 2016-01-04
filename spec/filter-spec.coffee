@@ -29,6 +29,13 @@ describe "filtering", ->
     candidates = ["Application:Hide"]
     expect(filter(candidates, 'help')).toEqual []
 
+  it "support unicode character with different length uppercase", ->
+
+    candidates = ["Bernauer Stra\u00DFe Wall"] # Bernauer Straße Wall
+    expect(filter(candidates, 'Stra\u00DFe Wall')).toEqual candidates
+  # before correction, The map ß->SS , place the W out of sync and prevent a match.
+  # After correction we map ß->S.
+
   describe "when the maxResults option is set", ->
     it "limits the results to the result size", ->
       candidates = ['Gruntfile', 'filter', 'bile']
@@ -290,7 +297,7 @@ describe "filtering", ->
       expect(bestMatch(['sub_zero', 'sub-zero', 'sub zero'], 'sz')).toBe 'sub_zero'
 
 
-    it "weighs CamelCase matches higher", ->
+    it "weighs acronym matches higher than middle of word letter", ->
 
       candidates = [
         'FilterFactors.html',
@@ -423,7 +430,32 @@ describe "filtering", ->
       expect(bestMatch(candidates, 'CCCa')).toBe candidates[0]
       expect(bestMatch(candidates, 'ccca')).toBe candidates[1]
 
+    it "prefers acronym matches that correspond to the full candidate acronym", ->
+      candidates = [
+        'JaVaScript',
+        'JavaScript'
+      ]
 
+      # <js vs JS> scores better than <js vs JVS>
+      expect(bestMatch(candidates, 'js')).toBe candidates[1]
+
+      candidates = [
+        'JSON',
+        'J.S.O.N.',
+        'JavaScript'
+      ]
+
+      # here 1:1 match outdo shorter start-of-word
+      expect(bestMatch(candidates, 'js')).toBe candidates[2]
+
+      candidates = [
+        'CSON',
+        'C.S.O.N.',
+        'CoffeeScript'
+      ]
+
+      # here 1:1 match outdo shorter start-of-word
+      expect(bestMatch(candidates, 'cs')).toBe candidates[2]
 
 
 
@@ -465,6 +497,16 @@ describe "filtering", ->
       ]
 
       expect(bestMatch(candidates, 'core')).toBe candidates[2]
+
+    it "prefers matches that are together in the basename (even if basename is longer)", ->
+
+      candidates = [
+        path.join('tests','buyers','orders_e2e.js'),
+        path.join('tests','buyers','users-addresses_e2e.js')
+      ]
+
+      expect(bestMatch(candidates, 'us_e2')).toBe candidates[1]
+
 
     it "allows to select using folder name", ->
 
@@ -512,6 +554,31 @@ describe "filtering", ->
       expect(bestMatch(candidates, 'core')).toBe candidates[1]
       expect(bestMatch(candidates, 'foo')).toBe candidates[0]
 
+    it "prefers file of the specified extension", ->
+
+      candidates = [
+        path.join('meas_astrom', 'include', 'Isst', 'meas','astrom','matchOptimisticB.h')
+        path.join('IsstDoxygen', 'html', 'match_optimistic_b_8cc.html')
+      ]
+
+      expect(bestMatch(candidates, 'mob.h')).toBe candidates[0]
+
+      candidates = [
+        path.join('matchOptimisticB.htaccess')
+        path.join('matchOptimisticB_main.html')
+      ]
+
+      expect(bestMatch(candidates, 'mob.ht')).toBe candidates[1]
+
+    it "support file with multiple extension", ->
+      candidates = [
+        path.join('something-foobar.class')
+        path.join('something.class.php')
+      ]
+
+      expect(bestMatch(candidates, 'some.cl')).toBe candidates[1]
+
+
     it "ignores trailing slashes", ->
 
       candidates = [
@@ -522,7 +589,7 @@ describe "filtering", ->
       expect(bestMatch(candidates, 'br')).toBe candidates[1]
 
 
-    it "allows candidate to be all slashes", ->
+    it "allows candidates to be all slashes", ->
       candidates = [path.sep, path.sep + path.sep + path.sep]
       expect(filter(candidates, 'bar')).toEqual []
 
@@ -544,28 +611,28 @@ describe "filtering", ->
 
     it "prefers shallow path", ->
 
-      candidate = [
+      candidates = [
         path.join('b', 'z', 'file'),
         path.join('b_z', 'file')
       ]
 
-      expect(bestMatch(candidate, "file")).toBe candidate[1]
-      expect(bestMatch(candidate, "fle")).toBe candidate[1]
+      expect(bestMatch(candidates, "file")).toBe candidates[1]
+      expect(bestMatch(candidates, "fle")).toBe candidates[1]
 
-      candidate = [
+      candidates = [
         path.join('foo', 'bar', 'baz', 'file'),
         path.join('foo', 'bar_baz', 'file')
       ]
 
-      expect(bestMatch(candidate, "file")).toBe candidate[1]
-      expect(bestMatch(candidate, "fle")).toBe candidate[1]
+      expect(bestMatch(candidates, "file")).toBe candidates[1]
+      expect(bestMatch(candidates, "fle")).toBe candidates[1]
 
-      candidate = [
+      candidates = [
         path.join('A Long User Full-Name', 'My Documents', 'file'),
         path.join('bin', 'lib', 'src', 'test', 'spec', 'file')
       ]
 
-      expect(bestMatch(candidate, "file")).toBe candidate[0]
+      expect(bestMatch(candidates, "file")).toBe candidates[0]
 
       # We have plenty of report on how this or that should win because file is a better basename match
       # But we have no report of searching too deep, because of that folder-depth penalty is pretty weak.
@@ -647,6 +714,22 @@ describe "filtering", ->
 
       expect(bestMatch(candidates, 'apps_controller')).toBe candidates[1]
 
+      candidates = [
+        path.join('config', 'application.rb'),
+        path.join('app', 'controllers', 'application_controller.rb')
+      ]
+
+      expect(bestMatch(candidates, 'appcon')).toBe candidates[1]
+
+
+    it "prefer path together to shorter path", ->
+
+      candidates = [
+        path.join('app', 'controllers', 'shipments_controller.rb'),
+        path.join('app', 'controllers', 'core', 'shipments_controller.rb')
+      ]
+
+      expect(bestMatch(candidates, 'core shipments controller')).toBe candidates[1]
 
   #
   #  Optional Characters
@@ -656,19 +739,19 @@ describe "filtering", ->
 
     it "allows to match path using either backward slash, forward slash, space or colon", ->
 
-      candidate = [
+      candidates = [
         path.join('foo', 'bar'),
         path.join('model', 'user'),
       ]
 
-      expect(bestMatch(candidate, "model user")).toBe candidate[1]
-      expect(bestMatch(candidate, "model/user")).toBe candidate[1]
-      expect(bestMatch(candidate, "model\\user")).toBe candidate[1]
-      expect(bestMatch(candidate, "model::user")).toBe candidate[1]
+      expect(bestMatch(candidates, "model user")).toBe candidates[1]
+      expect(bestMatch(candidates, "model/user")).toBe candidates[1]
+      expect(bestMatch(candidates, "model\\user")).toBe candidates[1]
+      expect(bestMatch(candidates, "model::user")).toBe candidates[1]
 
     it "prefer matches where the optional character is present", ->
 
-      candidate = [
+      candidates = [
         'ModelUser',
         'model user',
         'model/user',
@@ -678,12 +761,12 @@ describe "filtering", ->
         'model-user',
       ]
 
-      expect(bestMatch(candidate, "mdl user")).toBe candidate[1]
-      expect(bestMatch(candidate, "mdl/user")).toBe candidate[2]
-      expect(bestMatch(candidate, "mdl\\user")).toBe candidate[3]
-      expect(bestMatch(candidate, "mdl::user")).toBe candidate[4]
-      expect(bestMatch(candidate, "mdl_user")).toBe candidate[5]
-      expect(bestMatch(candidate, "mdl-user")).toBe candidate[6]
+      expect(bestMatch(candidates, "mdl user")).toBe candidates[1]
+      expect(bestMatch(candidates, "mdl/user")).toBe candidates[2]
+      expect(bestMatch(candidates, "mdl\\user")).toBe candidates[3]
+      expect(bestMatch(candidates, "mdl::user")).toBe candidates[4]
+      expect(bestMatch(candidates, "mdl_user")).toBe candidates[5]
+      expect(bestMatch(candidates, "mdl-user")).toBe candidates[6]
 
 
     it "weighs basename matches higher (space don't have a strict preference for slash)", ->
@@ -699,42 +782,47 @@ describe "filtering", ->
       # Without support for optional character, the basename bonus
       # would not be able to find "model" inside "user.rb" so the bonus would be 0
 
-      candidate = [
+      candidates = [
         path.join('www', 'lib', 'models', 'user.rb'),
         path.join('migrate', 'moderator_column_users.rb')
       ]
 
-      expect(bestMatch(candidate, "model user")).toBe candidate[0]
-      expect(bestMatch(candidate, "modeluser")).toBe candidate[0]
-      expect(bestMatch(candidate, path.join("model", "user"))).toBe candidate[0]
+      expect(bestMatch(candidates, "model user")).toBe candidates[0]
+      expect(bestMatch(candidates, "modeluser")).toBe candidates[0]
+      expect(bestMatch(candidates, path.join("model", "user"))).toBe candidates[0]
 
-      candidate = [
+      candidates = [
         path.join('destroy_discard_pool.png'),
         path.join('resources', 'src', 'app_controller.coffee')
       ]
 
-      expect(bestMatch(candidate, "src app")).toBe candidate[1]
-      expect(bestMatch(candidate, path.join("src", "app"))).toBe candidate[1]
+      expect(bestMatch(candidates, "src app")).toBe candidates[1]
+      expect(bestMatch(candidates, path.join("src", "app"))).toBe candidates[1]
 
-      candidate = [
+      candidates = [
         path.join('template', 'emails-dialogs.handlebars'),
         path.join('emails', 'handlers.py')
       ]
 
-      expect(bestMatch(candidate, "email handlers")).toBe candidate[1]
-      expect(bestMatch(candidate, path.join("email", "handlers"))).toBe candidate[1]
+      expect(bestMatch(candidates, "email handlers")).toBe candidates[1]
+      expect(bestMatch(candidates, path.join("email", "handlers"))).toBe candidates[1]
 
 
     it "allows to select between full query and basename using path.sep", ->
 
-      candidate = [
+      candidates = [
         path.join('models', 'user.rb'),
         path.join('migrate', 'model_users.rb')
       ]
 
-      expect(bestMatch(candidate, "modeluser")).toBe candidate[1]
-      expect(bestMatch(candidate, "model user")).toBe candidate[1]
-      expect(bestMatch(candidate, path.join("model","user"))).toBe candidate[0]
+      expect(bestMatch(candidates, "modeluser")).toBe candidates[1]
+      expect(bestMatch(candidates, "model user")).toBe candidates[1]
+      expect(bestMatch(candidates, path.join("model","user"))).toBe candidates[0]
+
+  describe "when query is made only of optional characters", ->
+    it "only return results having at least one specified optional character", ->
+      candidates = ["bla", "_test", " test"]
+      expect(filter(candidates, '_')).toEqual ['_test']
 
 
 
